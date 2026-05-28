@@ -2,7 +2,8 @@ import os
 import requests
 import gradio as gr
 
-BASE_API = "http://nginx/api"
+# 単独起動時は DASHBOARD_API_URL=http://localhost:10101/api 等で上書き可
+BASE_API = os.environ.get("DASHBOARD_API_URL", "http://nginx/api")
 
 def build_url(slug: str) -> str:
     return f"{BASE_API}/{slug.strip('/')}/ping"
@@ -19,6 +20,13 @@ def test_gateway_connection(api_key: str, slug: str, request: gr.Request = None)
         user_context = request.headers.get("x-user-context")
         if user_context:
             headers["X-User-Context"] = user_context
+
+    # Dev fallback: 単独起動時は nginx auth_request が無く X-User-Context が
+    # 来ないので、DEBUG_USER_CONTEXT を設定するとリレー先頭ホップを模擬できる
+    if "X-User-Context" not in headers:
+        debug_ctx = os.environ.get("DEBUG_USER_CONTEXT")
+        if debug_ctx:
+            headers["X-User-Context"] = debug_ctx
 
     try:
         resp = requests.get(url, headers=headers, timeout=5)
