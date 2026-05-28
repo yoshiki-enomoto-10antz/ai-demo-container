@@ -42,11 +42,27 @@ def test_gateway_connection(slug: str, request: gr.Request | None = None):
 
     if not auth_token:
         # ゲートウェイは未認証だと 401 を返すが、デバッグ容易化のためフロント側でもヒントを出す。
+        debug_info: dict = {}
+        if request is not None:
+            try:
+                debug_info["cookies_received"] = sorted(list(request.cookies.keys()))
+            except Exception:
+                debug_info["cookies_received"] = "unavailable"
+            try:
+                # Cookie / Host / Origin など nginx 経由かを切り分けやすいよう抜粋
+                hdrs = dict(request.headers)
+                debug_info["host"] = hdrs.get("host")
+                debug_info["cookie_header_present"] = "cookie" in hdrs
+                debug_info["x-forwarded-host"] = hdrs.get("x-forwarded-host")
+                debug_info["x-forwarded-for"] = hdrs.get("x-forwarded-for")
+            except Exception:
+                pass
         return url, {
             "warning": (
                 "auth_token cookie が見つかりませんでした。ダッシュボードにログイン済みのブラウザ"
                 "から開くか、単独起動時は DEBUG_AUTH_TOKEN 環境変数を設定してください。"
             ),
+            "debug": debug_info,
         }
 
     try:
