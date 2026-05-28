@@ -1,35 +1,56 @@
+"""ai-demo-container: ダッシュボードゲートウェイの疎通確認用 Gradio デモ。
+
+JWT-only 方針 (t-087〜) では、ツール作者の責任は
+「受け取った auth_token cookie を gateway 呼び出しにそのまま forward する」だけ。
+本ファイルは最小サンプルとして、その動作確認を UI 上で行えるようにしている。
+"""
+
 import os
 import requests
 import gradio as gr
 
-# 単独起動時は DASHBOARD_API_URL=http://localhost:10101/api 等で上書き可
+# 単独起動時は DASHBOARD_API_URL=http://localhost:10101/api 等で上書き可。
+# ダッシュボード管理下 (docker 内) では既定値の http://nginx/api を使う。
 BASE_API = os.environ.get("DASHBOARD_API_URL", "http://nginx/api")
+
 
 def build_url(slug: str) -> str:
     return f"{BASE_API}/{slug.strip('/')}/ping"
 
-def test_gateway_connection(api_key: str, slug: str, request: gr.Request = None):
-    if not api_key:
-        return "⚠️ API Key is required.", {"error": "API Key is required."}
+
+def _resolve_auth_token(request: gr.Request | None) -> str | None:
+    """auth_token を取得する。
+
+    優先順:
+      1. inbound cookie の auth_token  (ブラウザがログイン済みドメインから来た場合)
+      2. 環境変数 DEBUG_AUTH_TOKEN     (cookie が流れない単独起動デバッグ用)
+    """
+    if request is not None and hasattr(request, "cookies"):
+        token = request.cookies.get("auth_token")
+        if token:
+            return token
+    return os.environ.get("DEBUG_AUTH_TOKEN") or None
+
+
+def test_gateway_connection(slug: str, request: gr.Request | None = None):
     if not slug:
         return "⚠️ Slug is required.", {"error": "Slug is required."}
 
     url = build_url(slug)
-    headers = {"X-API-Key": api_key}
-    if request is not None:
-        user_context = request.headers.get("x-user-context")
-        if user_context:
-            headers["X-User-Context"] = user_context
+    auth_token = _resolve_auth_token(request)
+    cookies = {"auth_token": auth_token} if auth_token else None
 
-    # Dev fallback: 単独起動時は nginx auth_request が無く X-User-Context が
-    # 来ないので、DEBUG_USER_CONTEXT を設定するとリレー先頭ホップを模擬できる
-    if "X-User-Context" not in headers:
-        debug_ctx = os.environ.get("DEBUG_USER_CONTEXT")
-        if debug_ctx:
-            headers["X-User-Context"] = debug_ctx
+    if not auth_token:
+        # ゲートウェイは未認証だと 401 を返すが、デバッグ容易化のためフロント側でもヒントを出す。
+        return url, {
+            "warning": (
+                "auth_token cookie が見つかりませんでした。ダッシュボードにログイン済みのブラウザ"
+                "から開くか、単独起動時は DEBUG_AUTH_TOKEN 環境変数を設定してください。"
+            ),
+        }
 
     try:
-        resp = requests.get(url, headers=headers, timeout=5)
+        resp = requests.get(url, cookies=cookies, timeout=5)
         result = {
             "status_code": resp.status_code,
             "url": url,
@@ -44,21 +65,18 @@ def test_gateway_connection(api_key: str, slug: str, request: gr.Request = None)
     except Exception as e:
         return url, {"error": f"Request failed: {str(e)}"}
 
+
 with gr.Blocks(title="AI Dashboard Demo") as demo:
     gr.Markdown("# 🌐 AI Dashboard Demo - Gateway Test")
     gr.Markdown(
         "Validate connectivity with any registered tool via the `ai-dashboard` API Gateway.\n\n"
-        "**URL format**: `http://nginx/api/{slug}/ping`"
+        "**URL format**: `{base}/{slug}/ping` (e.g. `http://nginx/api/ai-backend/ping`)\n\n"
+        "**認証**: ブラウザの `auth_token` cookie をそのまま gateway へ forward します。"
+        "ツール側で API キーや JWT のデコードは不要です (JWT-only 方針)。"
     )
 
     with gr.Row():
         with gr.Column():
-            api_key = gr.Textbox(
-                label="Dashboard API Key (X-API-Key)",
-                placeholder="aid_...",
-                type="password",
-                value=os.environ.get("DASHBOARD_API_KEY", ""),
-            )
             slug = gr.Textbox(
                 label="Tool Slug",
                 placeholder="ai-backend",
@@ -79,9 +97,11 @@ with gr.Blocks(title="AI Dashboard Demo") as demo:
 
     btn.click(
         fn=test_gateway_connection,
-        inputs=[api_key, slug],
+        inputs=[slug],
         outputs=[url_preview, output],
     )
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    # ポート切替可能 (デフォルト 7860、tool-demo コンテナと衝突する場合は別ポートを env で指定)
+    server_port = int(os.environ.get("GRADIO_SERVER_PORT", "7860"))
+    demo.launch(server_name="0.0.0.0", server_port=server_port)

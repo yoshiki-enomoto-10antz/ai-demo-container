@@ -1,39 +1,72 @@
 # ai-demo-container
 
-AI Dashboard 動作検証用のデモ Gradio アプリケーション（呼び出し側ツール）。
+AI Dashboard 動作検証用のデモ Gradio アプリ（呼び出し側ツールの最小サンプル）。
 
-ダッシュボードゲートウェイ経由で任意の登録済みツールへ `/ping` を投げ、`X-API-Key` と `X-User-Context`
-リレーの挙動を目で確認できる。
+ダッシュボードゲートウェイ経由で任意の登録済みツールへ `/ping` を投げ、ログイン中ユーザーの
+identity が gateway 側で正しく記録されるかを目で確認できる。
+
+## 認証モデル (JWT-only, t-087〜)
+
+ツール側でやることは「受け取った `auth_token` cookie をそのまま gateway 呼び出しに forward する」だけ。
+JWT デコード・鍵管理・API キー発行は一切不要。詳細は `ai-dashboard/docs/guides/jwt-cookie-relay.md`。
+
+```python
+auth_token = request.cookies.get("auth_token")
+cookies = {"auth_token": auth_token} if auth_token else None
+requests.get(f"{GATEWAY}/api/gateway/{slug}/ping", cookies=cookies)
+```
 
 ## 構成
-- `app.py`: Gradio アプリ本体 (Port: 7860)
-- `requirements.txt`: 依存（gradio, requests）
+- `app.py`: Gradio アプリ本体 (Port 7860)
+- `requirements.txt` / `pyproject.toml`: 依存 (gradio, requests)
 - `Dockerfile`: コンテナビルド用
 
 ## 環境変数
 
 | 変数 | 既定値 | 用途 |
 |---|---|---|
-| `DASHBOARD_API_URL` | `http://nginx/api` | ゲートウェイのベース URL。単独起動時は host から到達可能な URL に上書き |
-| `DASHBOARD_API_KEY` | (空) | UI 初期値にだけ使う（フォームから手入力も可） |
-| `TOOL_SLUG` | `ai-backend` | UI 初期値にだけ使う |
-| `DEBUG_USER_CONTEXT` | (未設定) | **単独起動でリレー検証する時のみ**設定。X-User-Context トークンを手動投入 |
+| `DASHBOARD_API_URL` | `http://nginx/api` | ゲートウェイのベース URL。docker 内では既定のままでよい。ホストから単独起動する時は `http://localhost:10101/api` などに上書き |
+| `TOOL_SLUG` | `ai-backend` | UI 初期値 (フォームから手入力も可) |
+| `DEBUG_AUTH_TOKEN` | (未設定) | **単独起動デバッグ専用**。ブラウザの cookie がプロセスまで届かない場合に JWT を手動で投入する逃げ道 |
+| `GRADIO_SERVER_PORT` | `7860` | UI ポート。dashboard 経由で `tool-demo` コンテナが既に 7860 を掴んでいる時は別ポートに切り替える |
 
-## 単独起動（開発時に推奨）
+## 単独起動 (推奨開発フロー)
 
-ツール開発中はダッシュボードに登録しない方が反復が早い。`make dev` でダッシュボード backend
-（`localhost:10101`）が立ち上がっていれば、ai-demo-container は単独で起動できる。
+ツール開発中はダッシュボードに登録しない方が反復が早い。手順:
+
+1. `cd ai-dashboard && make dev` でダッシュボード一式 (backend: `localhost:10101`) を起動
+2. ブラウザで `http://localhost:10101` にログイン (Google または Guest)
+3. 同じブラウザで `http://localhost:7860` を開く  
+   → `auth_token` cookie は `Domain=.localhost` で発行されているのでこのプロセスにも届く
+4. Slug を入れて「Test Gateway Connectivity」を押す  
+   → ダッシュボードの「ログ履歴」画面に自分のユーザー名で記録されれば成功
 
 ### Python ローカル
 ```bash
 cd ai-demo-container
-pip install -r requirements.txt
+uv sync   # または: pip install -r requirements.txt
 
 DASHBOARD_API_URL=http://localhost:10101/api \
-DASHBOARD_API_KEY=<ダッシュボードで発行した API キー> \
 TOOL_SLUG=ai-backend \
-python app.py
+uv run python app.py
 # → http://localhost:7860
+```
+
+### ⚠ Port 7860 が既に使われている場合
+
+dashboard に demo ツールが登録されていると `tool-demo` コンテナが 7860 を掴んでいて
+`OSError: Cannot find empty port in range: 7860-7860` で起動失敗する。回避策:
+
+```bash
+# A) 単独起動を別ポートで動かす
+GRADIO_SERVER_PORT=7861 \
+DASHBOARD_API_URL=http://localhost:10101/api \
+uv run python app.py
+# → http://localhost:7861
+
+# B) または dashboard 側の demo コンテナを止めて 7860 を空ける
+docker rm -f tool-demo
+# (dashboard 上で「停止」操作してもよい)
 ```
 
 ### Docker 単独起動
@@ -41,37 +74,40 @@ python app.py
 docker build -t demo-tool .
 docker run --rm -p 7860:7860 \
   -e DASHBOARD_API_URL=http://host.docker.internal:10101/api \
-  -e DASHBOARD_API_KEY=... \
   -e TOOL_SLUG=ai-backend \
   demo-tool
 ```
 
-## X-User-Context リレーを単独で検証する
+## cookie が届かないケース (デバッグ用 fallback)
 
-単独起動だと nginx の `auth_request` が無いので、ブラウザから X-User-Context は届かない。リレー経路を
-模擬するには、ダッシュボードで発行された X-User-Context トークンを手動で投入する。
+別ブラウザから検証する、curl で叩く、Domain 設定が崩れている、などの理由で `auth_token` cookie が
+プロセスに届かない場合は `DEBUG_AUTH_TOKEN` で JWT を直接渡せる。
 
 ```bash
-# 1) ダッシュボードにブラウザでログイン後、devtools で auth_token cookie の値をコピー
-#    （Application → Cookies → localhost → auth_token）
+# 1) ログイン済みブラウザの devtools で auth_token cookie の値をコピー
+#    (Application → Cookies → localhost → auth_token)
 
-# 2) そのトークンで /api/internal/issue-context を叩き、レスポンスヘッダから X-User-Context を取得
-curl -i 'http://localhost:10101/api/internal/issue-context' \
-     -H "Cookie: auth_token=<step1 で取得した値>"
-# → "X-User-Context: <relay_token>" がレスポンスヘッダに出る
-
-# 3) その値を渡して単独起動
-DEBUG_USER_CONTEXT="<relay_token>" \
+# 2) その JWT を渡して単独起動
+DEBUG_AUTH_TOKEN="<コピーした JWT>" \
 DASHBOARD_API_URL=http://localhost:10101/api \
-DASHBOARD_API_KEY=... \
 python app.py
 ```
 
-ダッシュボード「ログ履歴」画面で当該リクエストが `userID=yoshiki`（自分のアカウント）で記録されれば
-リレーが効いている。relay_token の有効期限は5分なので、切れたら 2) からやり直し。
+JWT の有効期限はデフォルト 24h。切れたら 1) からやり直し。
 
-## ダッシュボード登録運用（仕上げ時）
+## curl での直接確認
 
-開発が落ち着いたら通常どおりダッシュボードにツール登録（routing_type=subdomain 推奨）。
-`DASHBOARD_API_URL` は未指定でよく、既定の `http://nginx/api` で docker 内通信に戻る。
-`DEBUG_USER_CONTEXT` も外す（nginx auth_request から本物の X-User-Context が来る）。
+UI を経由せず curl で gateway を叩く時:
+```bash
+# ログイン済みブラウザの auth_token を Cookie ヘッダで渡す
+curl -i 'http://localhost:10101/api/gateway/ai-backend/ping' \
+     -H "Cookie: auth_token=<JWT>"
+```
+
+## ダッシュボード登録運用 (本番に近い形で動かす時)
+
+開発が落ち着いたら通常どおりダッシュボードにツール登録 (routing_type=subdomain 推奨)。
+
+- `DASHBOARD_API_URL` は未指定でよく、既定の `http://nginx/api` で docker 内通信に戻る
+- `DEBUG_AUTH_TOKEN` も外す (ブラウザ cookie がそのまま流れる)
+- 登録後は `http://demo.localhost` (またはサブドメイン) からアクセスし、自分のユーザー名で記録されることを確認
