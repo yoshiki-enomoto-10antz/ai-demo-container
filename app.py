@@ -7,7 +7,7 @@ BASE_API = "http://nginx/api"
 def build_url(slug: str) -> str:
     return f"{BASE_API}/{slug.strip('/')}/ping"
 
-def test_gateway_connection(api_key: str, slug: str):
+def test_gateway_connection(api_key: str, slug: str, request: gr.Request = None):
     if not api_key:
         return "⚠️ API Key is required.", {"error": "API Key is required."}
     if not slug:
@@ -15,6 +15,10 @@ def test_gateway_connection(api_key: str, slug: str):
 
     url = build_url(slug)
     headers = {"X-API-Key": api_key}
+    if request is not None:
+        user_context = request.headers.get("x-user-context")
+        if user_context:
+            headers["X-User-Context"] = user_context
 
     try:
         resp = requests.get(url, headers=headers, timeout=5)
